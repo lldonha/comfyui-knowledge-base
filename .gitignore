@@ -1,0 +1,52 @@
+# Ambiente e configurações sensíveis
+.env
+*.env.local
+.env.*.local
+
+# Dados locais
+/data/
+/frames/
+/videos/
+*.mp4
+*.webm
+*.mkv
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+.venv/
+
+# Logs
+*.log
+logs/
+
+# Sistema
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+
+# Temporários
+*.tmp
+*.temp
+*.bak
+
+# Node (se usar)
+node_modules/
+
+# Credenciais (NUNCA commitar!)
+*credentials*.json
+*secret*
+*.pem
+*.key
