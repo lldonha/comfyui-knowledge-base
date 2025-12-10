@@ -1,0 +1,567 @@
+{
+  "name": "ComfyUI KB - Discover Source",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "comfyui-kb/discover",
+        "options": {}
+      },
+      "id": "webhook-discover",
+      "name": "Webhook - Discover",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "comfyui-kb-discover"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validar input\nconst input = $input.first().json.body;\n\nif (!input.url && !input.query) {\n  throw new Error('URL ou query é obrigatória');\n}\n\nreturn {\n  url: input.url || null,\n  query: input.query || null,  // Ex: \"canais de ComfyUI sobre video generation\"\n  autoFollow: input.autoFollow !== false,  // Seguir automaticamente\n  syncNow: input.syncNow !== false,  // Sincronizar imediatamente\n  checkFrequencyHours: input.checkFrequencyHours || 12\n};"
+      },
+      "id": "parse-discover-input",
+      "name": "Parse Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-url",
+              "leftValue": "={{ $json.url }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "has-url",
+      "name": "Has URL?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Detectar tipo de URL e extrair informações\nconst url = $input.first().json.url;\n\nlet platform = 'other';\nlet platformId = null;\nlet creatorHandle = null;\nlet needsGeminiAnalysis = false;\n\nif (url.includes('youtube.com') || url.includes('youtu.be')) {\n  platform = 'youtube';\n  \n  // Canal\n  const channelMatch = url.match(/@([a-zA-Z0-9_-]+)/);\n  const channelIdMatch = url.match(/channel\\/([a-zA-Z0-9_-]+)/);\n  \n  if (channelMatch) {\n    creatorHandle = channelMatch[1];\n    platformId = channelMatch[1];\n  } else if (channelIdMatch) {\n    platformId = channelIdMatch[1];\n  }\n  \n  // Se é só um vídeo, precisamos descobrir o canal\n  const videoMatch = url.match(/(?:v=|youtu\\.be\\/)([a-zA-Z0-9_-]{11})/);\n  if (videoMatch && !platformId) {\n    needsGeminiAnalysis = true;\n  }\n  \n} else if (url.includes('github.com')) {\n  platform = 'github';\n  const repoMatch = url.match(/github\\.com\\/([a-zA-Z0-9_-]+)/);\n  if (repoMatch) {\n    creatorHandle = repoMatch[1];\n    platformId = repoMatch[1];\n  }\n  \n} else if (url.includes('openart.ai')) {\n  platform = 'openart';\n  needsGeminiAnalysis = true;\n  \n} else if (url.includes('civitai.com')) {\n  platform = 'civitai';\n  const userMatch = url.match(/user\\/([a-zA-Z0-9_-]+)/);\n  if (userMatch) {\n    creatorHandle = userMatch[1];\n    platformId = userMatch[1];\n  }\n  \n} else {\n  needsGeminiAnalysis = true;\n}\n\nreturn {\n  ...$input.first().json,\n  platform,\n  platformId,\n  creatorHandle,\n  needsGeminiAnalysis\n};"
+      },
+      "id": "detect-platform",
+      "name": "Detect Platform",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, -100]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "is-youtube",
+              "leftValue": "={{ $json.platform }}",
+              "rightValue": "youtube",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "is-youtube-channel",
+      "name": "Is YouTube?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [880, -100]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://www.googleapis.com/youtube/v3/channels",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "part",
+              "value": "snippet,statistics,contentDetails"
+            },
+            {
+              "name": "forHandle",
+              "value": "={{ $json.creatorHandle }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "youtube-get-channel",
+      "name": "YouTube - Get Channel",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, -200],
+      "credentials": {
+        "googleApi": {
+          "id": "google-api",
+          "name": "Google API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Processar dados do canal YouTube\nconst ytResponse = $input.first().json;\nconst inputData = $('Detect Platform').first().json;\n\nif (!ytResponse.items || ytResponse.items.length === 0) {\n  throw new Error('Canal não encontrado');\n}\n\nconst channel = ytResponse.items[0];\nconst snippet = channel.snippet;\nconst stats = channel.statistics;\n\nreturn {\n  ...inputData,\n  platformId: channel.id,\n  creatorName: snippet.title,\n  creatorHandle: snippet.customUrl?.replace('@', '') || inputData.creatorHandle,\n  creatorBio: snippet.description?.substring(0, 1000),\n  thumbnailUrl: snippet.thumbnails?.high?.url,\n  subscriberCount: parseInt(stats.subscriberCount || 0),\n  videoCount: parseInt(stats.videoCount || 0),\n  viewCount: parseInt(stats.viewCount || 0),\n  uploadsPlaylistId: channel.contentDetails?.relatedPlaylists?.uploads,\n  platformUrl: `https://www.youtube.com/channel/${channel.id}`\n};"
+      },
+      "id": "process-youtube-channel",
+      "name": "Process YouTube Channel",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, -200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googlePalmApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [\n    {\n      \"parts\": [\n        {\n          \"text\": \"Analise este canal/criador de conteúdo de ComfyUI/Stable Diffusion:\\n\\nNome: {{ $json.creatorName }}\\nDescrição: {{ $json.creatorBio?.substring(0, 2000) || 'Não disponível' }}\\nVídeos: {{ $json.videoCount }}\\nInscritos: {{ $json.subscriberCount }}\\n\\nRetorne APENAS JSON (sem markdown):\\n{\\n  \\\"is_comfyui_related\\\": true/false,\\n  \\\"confidence\\\": 0.0-1.0,\\n  \\\"specialties\\\": [\\\"flux\\\", \\\"video\\\", \\\"upscaling\\\", etc],\\n  \\\"content_type\\\": \\\"tutorials|workflows|news|reviews|mixed\\\",\\n  \\\"quality_estimate\\\": 1-5,\\n  \\\"recommended_check_frequency_hours\\\": 6-168,\\n  \\\"notes\\\": \\\"observações relevantes\\\",\\n  \\\"similar_creators\\\": [\\\"nomes de criadores similares conhecidos\\\"]\\n}\"\n        }\n      ]\n    }\n  ],\n  \"generationConfig\": {\n    \"temperature\": 0.1,\n    \"maxOutputTokens\": 1024\n  }\n}",
+        "options": {}
+      },
+      "id": "gemini-analyze-creator",
+      "name": "Gemini - Analyze Creator",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1540, -200],
+      "credentials": {
+        "googlePalmApi": {
+          "id": "gemini-api",
+          "name": "Gemini API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Processar análise do Gemini sobre o criador\nconst geminiResponse = $input.first().json;\nconst creatorData = $('Process YouTube Channel').first().json;\n\nlet analysis;\ntry {\n  const text = geminiResponse.candidates[0].content.parts[0].text;\n  const cleanText = text.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n  analysis = JSON.parse(cleanText);\n} catch (e) {\n  analysis = {\n    is_comfyui_related: true,  // Assume positivo se erro\n    confidence: 0.5,\n    specialties: [],\n    quality_estimate: 3,\n    recommended_check_frequency_hours: 24\n  };\n}\n\nreturn {\n  ...creatorData,\n  geminiAnalysis: analysis,\n  shouldFollow: analysis.is_comfyui_related && analysis.confidence > 0.6,\n  checkFrequencyHours: analysis.recommended_check_frequency_hours || 12\n};"
+      },
+      "id": "process-creator-analysis",
+      "name": "Process Creator Analysis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1760, -200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "should-follow",
+              "leftValue": "={{ $json.shouldFollow }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "should-follow",
+      "name": "Should Follow?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1980, -200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Inserir criador\nINSERT INTO creators (\n  name,\n  handle,\n  bio,\n  specialties,\n  website_url,\n  quality_score,\n  notes\n)\nVALUES (\n  '{{ $json.creatorName.replace(/'/g, \"''\") }}',\n  '{{ $json.creatorHandle }}',\n  '{{ $json.creatorBio?.replace(/'/g, \"''\")?.substring(0, 2000) || '' }}',\n  ARRAY[{{ $json.geminiAnalysis.specialties?.map(s => `'${s}'`).join(',') || '' }}],\n  '{{ $json.platformUrl }}',\n  {{ $json.geminiAnalysis.quality_estimate || 3 }},\n  '{{ $json.geminiAnalysis.notes?.replace(/'/g, \"''\") || '' }}'\n)\nON CONFLICT DO NOTHING\nRETURNING id;",
+        "options": {}
+      },
+      "id": "insert-creator",
+      "name": "Insert Creator",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2200, -300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Inserir source\nINSERT INTO sources (\n  creator_id,\n  platform,\n  platform_id,\n  platform_url,\n  monitoring_status,\n  check_frequency_hours,\n  platform_metadata\n)\nVALUES (\n  (SELECT id FROM creators WHERE handle = '{{ $('Process Creator Analysis').first().json.creatorHandle }}' LIMIT 1),\n  '{{ $('Process Creator Analysis').first().json.platform }}',\n  '{{ $('Process Creator Analysis').first().json.platformId }}',\n  '{{ $('Process Creator Analysis').first().json.platformUrl }}',\n  'active',\n  {{ $('Process Creator Analysis').first().json.checkFrequencyHours }},\n  '{{ JSON.stringify({\n    uploadsPlaylistId: $('Process Creator Analysis').first().json.uploadsPlaylistId,\n    subscriberCount: $('Process Creator Analysis').first().json.subscriberCount,\n    videoCount: $('Process Creator Analysis').first().json.videoCount\n  }) }}'::jsonb\n)\nON CONFLICT (platform, platform_id) DO UPDATE SET\n  monitoring_status = 'active',\n  check_frequency_hours = EXCLUDED.check_frequency_hours,\n  updated_at = NOW()\nRETURNING id;",
+        "options": {}
+      },
+      "id": "insert-source",
+      "name": "Insert Source",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2200, -150],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Enfileirar sincronização inicial\nSELECT enqueue_job(\n  'sync_source'::job_type,\n  9,  -- Alta prioridade para nova fonte\n  {{ $('Insert Source').first().json.id }},\n  NULL,\n  NULL,\n  '{\"initial_sync\": true, \"max_videos\": 50}'::jsonb,\n  'youtube_data'\n) as job_id;",
+        "options": {}
+      },
+      "id": "enqueue-initial-sync",
+      "name": "Enqueue Initial Sync",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2420, -150],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Registrar atividade\nINSERT INTO activity_log (action, entity_type, entity_id, details)\nVALUES (\n  'source_discovered',\n  'source',\n  {{ $('Insert Source').first().json.id }},\n  '{{ JSON.stringify({\n    creator: $('Process Creator Analysis').first().json.creatorName,\n    platform: $('Process Creator Analysis').first().json.platform,\n    analysis: $('Process Creator Analysis').first().json.geminiAnalysis\n  }) }}'::jsonb\n);",
+        "options": {}
+      },
+      "id": "log-discovery",
+      "name": "Log Discovery",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2420, -300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"message\": \"Source discovered and added for monitoring\",\n  \"data\": {\n    \"creator\": \"{{ $('Process Creator Analysis').first().json.creatorName }}\",\n    \"platform\": \"{{ $('Process Creator Analysis').first().json.platform }}\",\n    \"sourceId\": {{ $('Insert Source').first().json.id }},\n    \"analysis\": {{ JSON.stringify($('Process Creator Analysis').first().json.geminiAnalysis) }},\n    \"syncJobId\": {{ $('Enqueue Initial Sync').first().json.job_id }}\n  }\n}",
+        "options": {}
+      },
+      "id": "respond-discovered",
+      "name": "Respond - Discovered",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2640, -200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": false,\n  \"message\": \"Source not relevant to ComfyUI content\",\n  \"data\": {\n    \"creator\": \"{{ $json.creatorName }}\",\n    \"analysis\": {{ JSON.stringify($json.geminiAnalysis) }},\n    \"recommendation\": \"This creator doesn't appear to focus on ComfyUI/Stable Diffusion content\"\n  }\n}",
+        "options": {}
+      },
+      "id": "respond-not-relevant",
+      "name": "Respond - Not Relevant",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2200, -50]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googlePalmApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [\n    {\n      \"parts\": [\n        {\n          \"text\": \"Busco criadores de conteúdo sobre ComfyUI/Stable Diffusion com foco em: {{ $('Parse Input').first().json.query }}\\n\\nMe sugira canais do YouTube, perfis do GitHub, ou outras fontes que eu deveria seguir.\\n\\nRetorne APENAS JSON (sem markdown):\\n{\\n  \\\"suggestions\\\": [\\n    {\\n      \\\"name\\\": \\\"Nome do criador\\\",\\n      \\\"platform\\\": \\\"youtube|github|civitai|openart\\\",\\n      \\\"url\\\": \\\"URL completa\\\",\\n      \\\"reason\\\": \\\"Por que é relevante\\\",\\n      \\\"specialties\\\": [\\\"área1\\\", \\\"área2\\\"]\\n    }\\n  ],\\n  \\\"search_tips\\\": \\\"Dicas para encontrar mais conteúdo similar\\\"\\n}\"\n        }\n      ]\n    }\n  ],\n  \"generationConfig\": {\n    \"temperature\": 0.7,\n    \"maxOutputTokens\": 2048\n  }\n}",
+        "options": {}
+      },
+      "id": "gemini-search-creators",
+      "name": "Gemini - Search Creators",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 100],
+      "credentials": {
+        "googlePalmApi": {
+          "id": "gemini-api",
+          "name": "Gemini API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Processar sugestões do Gemini\nconst geminiResponse = $input.first().json;\nconst inputData = $('Parse Input').first().json;\n\nlet suggestions;\ntry {\n  const text = geminiResponse.candidates[0].content.parts[0].text;\n  const cleanText = text.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n  suggestions = JSON.parse(cleanText);\n} catch (e) {\n  suggestions = {\n    suggestions: [],\n    error: 'Failed to parse Gemini response'\n  };\n}\n\nreturn {\n  query: inputData.query,\n  suggestions: suggestions.suggestions || [],\n  searchTips: suggestions.search_tips,\n  autoFollow: inputData.autoFollow\n};"
+      },
+      "id": "process-search-results",
+      "name": "Process Search Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 100]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"message\": \"Found creator suggestions\",\n  \"data\": {\n    \"query\": \"{{ $json.query }}\",\n    \"suggestions\": {{ JSON.stringify($json.suggestions) }},\n    \"tips\": \"{{ $json.searchTips }}\",\n    \"note\": \"Use POST /comfyui-kb/discover with {url: '...'} to add any of these sources\"\n  }\n}",
+        "options": {}
+      },
+      "id": "respond-suggestions",
+      "name": "Respond - Suggestions",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1100, 100]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": false,\n  \"message\": \"Platform not yet supported for auto-discovery\",\n  \"data\": {\n    \"platform\": \"{{ $json.platform }}\",\n    \"url\": \"{{ $json.url }}\",\n    \"suggestion\": \"Try with a YouTube channel URL for now\"\n  }\n}",
+        "options": {}
+      },
+      "id": "respond-unsupported-platform",
+      "name": "Respond - Unsupported",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1100, 0]
+    }
+  ],
+  "connections": {
+    "Webhook - Discover": {
+      "main": [
+        [
+          {
+            "node": "Parse Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Input": {
+      "main": [
+        [
+          {
+            "node": "Has URL?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has URL?": {
+      "main": [
+        [
+          {
+            "node": "Detect Platform",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Gemini - Search Creators",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Detect Platform": {
+      "main": [
+        [
+          {
+            "node": "Is YouTube?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is YouTube?": {
+      "main": [
+        [
+          {
+            "node": "YouTube - Get Channel",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond - Unsupported",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "YouTube - Get Channel": {
+      "main": [
+        [
+          {
+            "node": "Process YouTube Channel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process YouTube Channel": {
+      "main": [
+        [
+          {
+            "node": "Gemini - Analyze Creator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini - Analyze Creator": {
+      "main": [
+        [
+          {
+            "node": "Process Creator Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Creator Analysis": {
+      "main": [
+        [
+          {
+            "node": "Should Follow?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Follow?": {
+      "main": [
+        [
+          {
+            "node": "Insert Creator",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Insert Source",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond - Not Relevant",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert Source": {
+      "main": [
+        [
+          {
+            "node": "Enqueue Initial Sync",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Log Discovery",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enqueue Initial Sync": {
+      "main": [
+        [
+          {
+            "node": "Respond - Discovered",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini - Search Creators": {
+      "main": [
+        [
+          {
+            "node": "Process Search Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Search Results": {
+      "main": [
+        [
+          {
+            "node": "Respond - Suggestions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "ComfyUI-KB"
+    }
+  ]
+}

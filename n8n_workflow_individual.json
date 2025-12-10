@@ -1,0 +1,665 @@
+{
+  "name": "ComfyUI KB - Individual Analysis",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "comfyui-kb/analyze",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook - Analyze Request",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "comfyui-kb-analyze"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validar e preparar input\nconst input = $input.first().json.body;\n\nif (!input.url) {\n  throw new Error('URL é obrigatória');\n}\n\nconst url = input.url;\nlet platform = null;\nlet videoId = null;\nlet channelId = null;\n\n// Detectar plataforma e extrair IDs\nif (url.includes('youtube.com') || url.includes('youtu.be')) {\n  platform = 'youtube';\n  \n  // Extrair video ID\n  const videoMatch = url.match(/(?:v=|youtu\\.be\\/)([a-zA-Z0-9_-]{11})/);\n  if (videoMatch) {\n    videoId = videoMatch[1];\n  }\n  \n  // Extrair channel\n  const channelMatch = url.match(/(?:channel\\/|@)([a-zA-Z0-9_-]+)/);\n  if (channelMatch) {\n    channelId = channelMatch[1];\n  }\n} else if (url.includes('github.com')) {\n  platform = 'github';\n} else if (url.includes('openart.ai')) {\n  platform = 'openart';\n} else if (url.includes('civitai.com')) {\n  platform = 'civitai';\n} else if (url.includes('comfyworkflows.com')) {\n  platform = 'comfyworkflows';\n}\n\nreturn {\n  url,\n  platform,\n  videoId,\n  channelId,\n  priority: input.priority || 10,  // Individual = alta prioridade\n  analyzeNow: input.analyzeNow !== false,  // Default true\n  extractFrames: input.extractFrames !== false\n};"
+      },
+      "id": "parse-input",
+      "name": "Parse Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "youtube-video",
+              "leftValue": "={{ $json.platform }}",
+              "rightValue": "youtube",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-platform",
+      "name": "Is YouTube?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Verificar se vídeo já existe\nSELECT v.*, va.summary, s.id as source_id\nFROM videos v\nLEFT JOIN video_analysis va ON v.id = va.video_id\nLEFT JOIN sources s ON v.source_id = s.id\nWHERE v.external_id = '{{ $json.videoId }}'\nLIMIT 1;",
+        "options": {}
+      },
+      "id": "check-video-exists",
+      "name": "Check Video Exists",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [660, -100],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-analysis",
+              "leftValue": "={{ $json.summary }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-has-analysis",
+      "name": "Already Analyzed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [880, -100]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://www.googleapis.com/youtube/v3/videos",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "part",
+              "value": "snippet,contentDetails,statistics"
+            },
+            {
+              "name": "id",
+              "value": "={{ $('Parse Input').item.json.videoId }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "youtube-get-video",
+      "name": "YouTube - Get Video Details",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, -200],
+      "credentials": {
+        "googleApi": {
+          "id": "google-api",
+          "name": "Google API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://www.youtube.com/watch?v={{ $('Parse Input').item.json.videoId }}",
+        "options": {}
+      },
+      "id": "get-video-page",
+      "name": "Get Video Page (for transcript)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Processar resposta do YouTube API\nconst ytResponse = $('YouTube - Get Video Details').first().json;\nconst inputData = $('Parse Input').first().json;\n\nif (!ytResponse.items || ytResponse.items.length === 0) {\n  throw new Error('Vídeo não encontrado');\n}\n\nconst video = ytResponse.items[0];\nconst snippet = video.snippet;\nconst contentDetails = video.contentDetails;\nconst statistics = video.statistics;\n\n// Parsear duração ISO 8601\nfunction parseDuration(duration) {\n  const match = duration.match(/PT(?:(\\d+)H)?(?:(\\d+)M)?(?:(\\d+)S)?/);\n  if (!match) return 0;\n  const hours = parseInt(match[1] || 0);\n  const minutes = parseInt(match[2] || 0);\n  const seconds = parseInt(match[3] || 0);\n  return hours * 3600 + minutes * 60 + seconds;\n}\n\n// Extrair links da descrição\nfunction extractLinks(description) {\n  const urlRegex = /(https?:\\/\\/[^\\s<>\"{}|\\\\^\\[\\]`]+)/g;\n  const matches = description.match(urlRegex) || [];\n  \n  return matches.map(url => {\n    let type = 'other';\n    if (url.includes('github.com')) type = 'github';\n    else if (url.includes('civitai.com')) type = 'civitai';\n    else if (url.includes('huggingface.co')) type = 'huggingface';\n    else if (url.includes('openart.ai')) type = 'openart';\n    else if (url.includes('drive.google.com')) type = 'gdrive';\n    else if (url.includes('mega.nz')) type = 'mega';\n    else if (url.includes('patreon.com')) type = 'patreon';\n    else if (url.includes('discord')) type = 'discord';\n    else if (url.match(/\\.json($|\\?)/)) type = 'workflow';\n    \n    return { url, type };\n  });\n}\n\nconst extractedLinks = extractLinks(snippet.description || '');\nconst workflowLinks = extractedLinks.filter(l => \n  l.type === 'workflow' || \n  l.type === 'github' || \n  l.type === 'civitai' ||\n  l.type === 'gdrive'\n);\n\nreturn {\n  videoId: video.id,\n  title: snippet.title,\n  description: snippet.description,\n  channelId: snippet.channelId,\n  channelTitle: snippet.channelTitle,\n  publishedAt: snippet.publishedAt,\n  thumbnailUrl: snippet.thumbnails?.maxres?.url || snippet.thumbnails?.high?.url,\n  durationSeconds: parseDuration(contentDetails.duration),\n  viewCount: parseInt(statistics.viewCount || 0),\n  likeCount: parseInt(statistics.likeCount || 0),\n  commentCount: parseInt(statistics.commentCount || 0),\n  extractedLinks,\n  workflowLinks,\n  url: `https://www.youtube.com/watch?v=${video.id}`\n};"
+      },
+      "id": "process-youtube-data",
+      "name": "Process YouTube Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, -100]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Inserir ou atualizar criador\nINSERT INTO creators (name, handle)\nVALUES ('{{ $json.channelTitle }}', '{{ $json.channelId }}')\nON CONFLICT (id) DO UPDATE SET\n  name = EXCLUDED.name,\n  updated_at = NOW()\nRETURNING id;",
+        "options": {}
+      },
+      "id": "upsert-creator",
+      "name": "Upsert Creator",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1540, -200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Inserir source se não existir\nINSERT INTO sources (creator_id, platform, platform_id, platform_url, monitoring_status)\nVALUES (\n  (SELECT id FROM creators WHERE handle = '{{ $('Process YouTube Data').item.json.channelId }}' LIMIT 1),\n  'youtube',\n  '{{ $('Process YouTube Data').item.json.channelId }}',\n  'https://www.youtube.com/channel/{{ $('Process YouTube Data').item.json.channelId }}',\n  'active'\n)\nON CONFLICT (platform, platform_id) DO UPDATE SET\n  monitoring_status = 'active',\n  updated_at = NOW()\nRETURNING id;",
+        "options": {}
+      },
+      "id": "upsert-source",
+      "name": "Upsert Source",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1540, -50],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Inserir vídeo\nINSERT INTO videos (\n  source_id,\n  external_id,\n  url,\n  title,\n  description,\n  thumbnail_url,\n  duration_seconds,\n  published_at,\n  view_count,\n  like_count,\n  comment_count,\n  extracted_links\n)\nVALUES (\n  {{ $('Upsert Source').first().json.id }},\n  '{{ $('Process YouTube Data').item.json.videoId }}',\n  '{{ $('Process YouTube Data').item.json.url }}',\n  '{{ $('Process YouTube Data').item.json.title.replace(/'/g, \"''\") }}',\n  '{{ $('Process YouTube Data').item.json.description.replace(/'/g, \"''\").substring(0, 10000) }}',\n  '{{ $('Process YouTube Data').item.json.thumbnailUrl }}',\n  {{ $('Process YouTube Data').item.json.durationSeconds }},\n  '{{ $('Process YouTube Data').item.json.publishedAt }}',\n  {{ $('Process YouTube Data').item.json.viewCount }},\n  {{ $('Process YouTube Data').item.json.likeCount }},\n  {{ $('Process YouTube Data').item.json.commentCount }},\n  '{{ JSON.stringify($('Process YouTube Data').item.json.extractedLinks) }}'::jsonb\n)\nON CONFLICT (source_id, external_id) DO UPDATE SET\n  title = EXCLUDED.title,\n  view_count = EXCLUDED.view_count,\n  like_count = EXCLUDED.like_count,\n  updated_at = NOW()\nRETURNING id;",
+        "options": {}
+      },
+      "id": "insert-video",
+      "name": "Insert Video",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1760, -100],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Verificar rate limit do Gemini\nSELECT check_and_increment_rate_limit('gemini_flash') as can_proceed;",
+        "options": {}
+      },
+      "id": "check-rate-limit",
+      "name": "Check Gemini Rate Limit",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1980, -100],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "can-proceed",
+              "leftValue": "={{ $json.can_proceed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "rate-limit-ok",
+      "name": "Rate Limit OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2200, -100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googlePalmApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [\n    {\n      \"parts\": [\n        {\n          \"text\": \"Analise este tutorial de ComfyUI e retorne um JSON estruturado.\\n\\nTítulo: {{ $('Process YouTube Data').item.json.title }}\\n\\nDescrição:\\n{{ $('Process YouTube Data').item.json.description.substring(0, 5000) }}\\n\\nRetorne APENAS o JSON (sem markdown, sem ```), com esta estrutura:\\n{\\n  \\\"summary\\\": \\\"Resumo em 2-3 parágrafos do que o vídeo ensina\\\",\\n  \\\"summary_pt\\\": \\\"Mesmo resumo em português brasileiro\\\",\\n  \\\"key_topics\\\": [\\\"tópico1\\\", \\\"tópico2\\\"],\\n  \\\"techniques\\\": [\\\"img2img\\\", \\\"controlnet\\\", etc],\\n  \\\"models_mentioned\\\": [\\\"SDXL\\\", \\\"Flux\\\", etc],\\n  \\\"custom_nodes_mentioned\\\": [\\\"ComfyUI-Manager\\\", etc],\\n  \\\"difficulty\\\": \\\"beginner|intermediate|advanced\\\",\\n  \\\"prerequisites\\\": [\\\"O que precisa saber antes\\\"],\\n  \\\"estimated_watch_time_minutes\\\": número,\\n  \\\"key_timestamps\\\": [\\n    {\\n      \\\"time\\\": \\\"MM:SS\\\",\\n      \\\"type\\\": \\\"workflow_shown|node_explained|tip|result\\\",\\n      \\\"description\\\": \\\"O que acontece\\\",\\n      \\\"importance\\\": 1-10\\n    }\\n  ]\\n}\"\n        }\n      ]\n    }\n  ],\n  \"generationConfig\": {\n    \"temperature\": 0.2,\n    \"maxOutputTokens\": 4096\n  }\n}",
+        "options": {}
+      },
+      "id": "gemini-analyze",
+      "name": "Gemini - Analyze Video",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2420, -200],
+      "credentials": {
+        "googlePalmApi": {
+          "id": "gemini-api",
+          "name": "Gemini API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Processar resposta do Gemini\nconst geminiResponse = $input.first().json;\nconst videoData = $('Process YouTube Data').first().json;\nconst videoDbId = $('Insert Video').first().json.id;\n\nlet analysis;\ntry {\n  // Extrair texto da resposta\n  const text = geminiResponse.candidates[0].content.parts[0].text;\n  \n  // Limpar possíveis marcadores de código\n  const cleanText = text\n    .replace(/```json\\n?/g, '')\n    .replace(/```\\n?/g, '')\n    .trim();\n  \n  analysis = JSON.parse(cleanText);\n} catch (e) {\n  console.error('Erro ao parsear resposta do Gemini:', e);\n  analysis = {\n    summary: 'Erro ao processar análise',\n    error: e.message,\n    raw: geminiResponse\n  };\n}\n\nreturn {\n  videoDbId,\n  videoId: videoData.videoId,\n  title: videoData.title,\n  analysis,\n  tokensUsed: geminiResponse.usageMetadata?.totalTokenCount || 0\n};"
+      },
+      "id": "process-gemini-response",
+      "name": "Process Gemini Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2640, -200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Inserir análise do vídeo\nINSERT INTO video_analysis (\n  video_id,\n  summary,\n  summary_pt,\n  difficulty_level,\n  key_topics,\n  techniques_shown,\n  models_mentioned,\n  custom_nodes_mentioned,\n  prerequisites,\n  raw_response,\n  model_used,\n  tokens_used\n)\nVALUES (\n  {{ $json.videoDbId }},\n  '{{ $json.analysis.summary?.replace(/'/g, \"''\") || '' }}',\n  '{{ $json.analysis.summary_pt?.replace(/'/g, \"''\") || '' }}',\n  '{{ $json.analysis.difficulty || 'intermediate' }}',\n  ARRAY[{{ $json.analysis.key_topics?.map(t => `'${t}'`).join(',') || '' }}],\n  ARRAY[{{ $json.analysis.techniques?.map(t => `'${t}'`).join(',') || '' }}],\n  ARRAY[{{ $json.analysis.models_mentioned?.map(t => `'${t}'`).join(',') || '' }}],\n  ARRAY[{{ $json.analysis.custom_nodes_mentioned?.map(t => `'${t}'`).join(',') || '' }}],\n  ARRAY[{{ $json.analysis.prerequisites?.map(t => `'${t.replace(/'/g, \"''\")}'`).join(',') || '' }}],\n  '{{ JSON.stringify($json.analysis).replace(/'/g, \"''\") }}'::jsonb,\n  'gemini-1.5-flash',\n  {{ $json.tokensUsed }}\n)\nON CONFLICT (video_id) DO UPDATE SET\n  summary = EXCLUDED.summary,\n  summary_pt = EXCLUDED.summary_pt,\n  raw_response = EXCLUDED.raw_response,\n  updated_at = NOW()\nRETURNING id;",
+        "options": {}
+      },
+      "id": "insert-analysis",
+      "name": "Insert Analysis",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2860, -200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Inserir momentos-chave se existirem\nconst analysis = $('Process Gemini Response').first().json.analysis;\nconst videoDbId = $('Process Gemini Response').first().json.videoDbId;\n\nif (!analysis.key_timestamps || analysis.key_timestamps.length === 0) {\n  return { moments: [], videoDbId };\n}\n\n// Converter timestamps para segundos\nfunction parseTimestamp(time) {\n  const parts = time.split(':').map(Number);\n  if (parts.length === 2) {\n    return parts[0] * 60 + parts[1];\n  } else if (parts.length === 3) {\n    return parts[0] * 3600 + parts[1] * 60 + parts[2];\n  }\n  return 0;\n}\n\nconst moments = analysis.key_timestamps.map(m => ({\n  videoDbId,\n  timestampSeconds: parseTimestamp(m.time),\n  timestampFormatted: m.time,\n  momentType: m.type || 'other',\n  importance: m.importance || 5,\n  description: m.description\n}));\n\nreturn { moments, videoDbId };"
+      },
+      "id": "prepare-moments",
+      "name": "Prepare Moments",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3080, -200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Atualizar status do vídeo\nUPDATE videos SET\n  analysis_status = 'completed',\n  updated_at = NOW()\nWHERE id = {{ $json.videoDbId }};",
+        "options": {}
+      },
+      "id": "update-video-status",
+      "name": "Update Video Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [3300, -200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Enfileirar job para extração de frames\nSELECT enqueue_job(\n  'extract_frames'::job_type,\n  8,\n  NULL,\n  {{ $('Process Gemini Response').first().json.videoDbId }},\n  NULL,\n  '{{ JSON.stringify({ timestamps: $('Prepare Moments').first().json.moments.map(m => m.timestampSeconds) }) }}'::jsonb,\n  NULL\n) as job_id;",
+        "options": {}
+      },
+      "id": "enqueue-frames-job",
+      "name": "Enqueue Frames Extraction",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [3300, 0],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"message\": \"Video analyzed successfully\",\n  \"data\": {\n    \"videoId\": \"{{ $('Process YouTube Data').item.json.videoId }}\",\n    \"title\": \"{{ $('Process YouTube Data').item.json.title }}\",\n    \"analysisId\": {{ $('Insert Analysis').first().json.id }},\n    \"summary\": \"{{ $('Process Gemini Response').first().json.analysis.summary?.substring(0, 200) }}...\"\n  }\n}",
+        "options": {}
+      },
+      "id": "respond-success",
+      "name": "Respond Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [3520, -200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Enfileirar para processamento posterior\nSELECT enqueue_job(\n  'analyze_video'::job_type,\n  {{ $('Parse Input').first().json.priority }},\n  NULL,\n  {{ $('Insert Video').first().json.id }},\n  NULL,\n  '{}'::jsonb,\n  'gemini_flash',\n  NOW() + INTERVAL '1 minute'\n) as job_id;",
+        "options": {}
+      },
+      "id": "enqueue-for-later",
+      "name": "Enqueue for Later",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2420, 0],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"message\": \"Video queued for analysis (rate limit reached)\",\n  \"data\": {\n    \"videoId\": \"{{ $('Process YouTube Data').item.json.videoId }}\",\n    \"jobId\": {{ $('Enqueue for Later').first().json.job_id }},\n    \"status\": \"queued\"\n  }\n}",
+        "options": {}
+      },
+      "id": "respond-queued",
+      "name": "Respond Queued",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2640, 0]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"message\": \"Video already analyzed\",\n  \"data\": {\n    \"videoId\": \"{{ $('Parse Input').first().json.videoId }}\",\n    \"summary\": \"{{ $('Check Video Exists').first().json.summary?.substring(0, 500) }}\",\n    \"status\": \"already_processed\"\n  }\n}",
+        "options": {}
+      },
+      "id": "respond-already-analyzed",
+      "name": "Respond Already Analyzed",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1100, -300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": false,\n  \"message\": \"Platform not supported yet\",\n  \"data\": {\n    \"platform\": \"{{ $('Parse Input').first().json.platform }}\",\n    \"url\": \"{{ $('Parse Input').first().json.url }}\"\n  }\n}",
+        "options": {}
+      },
+      "id": "respond-unsupported",
+      "name": "Respond Unsupported Platform",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [660, 100]
+    }
+  ],
+  "connections": {
+    "Webhook - Analyze Request": {
+      "main": [
+        [
+          {
+            "node": "Parse Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Input": {
+      "main": [
+        [
+          {
+            "node": "Is YouTube?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is YouTube?": {
+      "main": [
+        [
+          {
+            "node": "Check Video Exists",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Unsupported Platform",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Video Exists": {
+      "main": [
+        [
+          {
+            "node": "Already Analyzed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Already Analyzed?": {
+      "main": [
+        [
+          {
+            "node": "Respond Already Analyzed",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "YouTube - Get Video Details",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Video Page (for transcript)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "YouTube - Get Video Details": {
+      "main": [
+        [
+          {
+            "node": "Process YouTube Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process YouTube Data": {
+      "main": [
+        [
+          {
+            "node": "Upsert Creator",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Upsert Source",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Source": {
+      "main": [
+        [
+          {
+            "node": "Insert Video",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert Video": {
+      "main": [
+        [
+          {
+            "node": "Check Gemini Rate Limit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Gemini Rate Limit": {
+      "main": [
+        [
+          {
+            "node": "Rate Limit OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rate Limit OK?": {
+      "main": [
+        [
+          {
+            "node": "Gemini - Analyze Video",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Enqueue for Later",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini - Analyze Video": {
+      "main": [
+        [
+          {
+            "node": "Process Gemini Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Gemini Response": {
+      "main": [
+        [
+          {
+            "node": "Insert Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert Analysis": {
+      "main": [
+        [
+          {
+            "node": "Prepare Moments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Moments": {
+      "main": [
+        [
+          {
+            "node": "Update Video Status",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Enqueue Frames Extraction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Video Status": {
+      "main": [
+        [
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enqueue for Later": {
+      "main": [
+        [
+          {
+            "node": "Respond Queued",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "ComfyUI-KB"
+    }
+  ]
+}

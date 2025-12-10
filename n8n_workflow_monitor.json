@@ -1,0 +1,247 @@
+{
+  "name": "ComfyUI KB - Monitor Sources",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "id": "schedule-monitor",
+      "name": "Every 6 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Buscar fontes que precisam ser verificadas\nSELECT \n  s.id,\n  s.platform,\n  s.platform_id,\n  s.platform_url,\n  s.platform_metadata,\n  s.check_frequency_hours,\n  s.last_checked_at,\n  s.total_items_found,\n  c.name as creator_name,\n  c.handle as creator_handle\nFROM sources s\nJOIN creators c ON s.creator_id = c.id\nWHERE s.monitoring_status = 'active'\n  AND (\n    s.next_check_at IS NULL \n    OR s.next_check_at <= NOW()\n  )\nORDER BY s.last_checked_at ASC NULLS FIRST\nLIMIT 10;",
+        "options": {}
+      },
+      "id": "get-sources-to-check",
+      "name": "Get Sources to Check",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [220, 0],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-sources",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "number",
+                "operation": "exists"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "has-sources",
+      "name": "Has Sources?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Preparar jobs de sincronização para cada fonte\nconst sources = $input.all().map(i => i.json);\n\nreturn sources.map(source => ({\n  sourceId: source.id,\n  platform: source.platform,\n  creatorName: source.creator_name,\n  lastChecked: source.last_checked_at,\n  checkFrequency: source.check_frequency_hours\n}));"
+      },
+      "id": "prepare-sync-jobs",
+      "name": "Prepare Sync Jobs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, -100]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Enfileirar sync para cada fonte\nSELECT enqueue_job(\n  'sync_source'::job_type,\n  5,\n  {{ $json.sourceId }},\n  NULL,\n  NULL,\n  '{\"scheduled_check\": true, \"max_videos\": 10}'::jsonb,\n  'youtube_data'\n) as job_id;",
+        "options": {}
+      },
+      "id": "enqueue-sync",
+      "name": "Enqueue Sync Job",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [880, -100],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Estatísticas do sistema\nSELECT \n  (SELECT COUNT(*) FROM sources WHERE monitoring_status = 'active') as active_sources,\n  (SELECT COUNT(*) FROM videos) as total_videos,\n  (SELECT COUNT(*) FROM videos WHERE analysis_status = 'completed') as analyzed_videos,\n  (SELECT COUNT(*) FROM job_queue WHERE status = 'pending') as pending_jobs,\n  (SELECT COUNT(*) FROM job_queue WHERE status = 'processing') as processing_jobs,\n  (SELECT COUNT(*) FROM job_queue WHERE status = 'failed' AND created_at > NOW() - INTERVAL '24 hours') as failed_jobs_24h,\n  (SELECT SUM(tokens_used) FROM video_analysis WHERE created_at > NOW() - INTERVAL '24 hours') as tokens_used_24h;",
+        "options": {}
+      },
+      "id": "get-stats",
+      "name": "Get System Stats",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [660, 100],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Limpar jobs antigos completados (manter 7 dias)\nDELETE FROM job_queue \nWHERE status = 'completed' \n  AND completed_at < NOW() - INTERVAL '7 days';\n\n-- Limpar logs antigos (manter 30 dias)\nDELETE FROM activity_log \nWHERE created_at < NOW() - INTERVAL '30 days';\n\n-- Resetar rate limits expirados\nUPDATE api_configs\nSET \n  current_minute_count = 0,\n  minute_reset_at = NOW() + INTERVAL '1 minute'\nWHERE minute_reset_at < NOW();\n\nUPDATE api_configs\nSET \n  current_day_count = 0,\n  day_reset_at = NOW() + INTERVAL '1 day'\nWHERE day_reset_at < NOW();",
+        "options": {}
+      },
+      "id": "cleanup",
+      "name": "Cleanup Old Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [880, 100],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Registrar execução do monitor\nINSERT INTO activity_log (action, entity_type, details)\nVALUES (\n  'monitor_run',\n  'system',\n  '{{ JSON.stringify({\n    sources_queued: $('Prepare Sync Jobs').all().length,\n    stats: $('Get System Stats').first().json\n  }) }}'::jsonb\n);",
+        "options": {}
+      },
+      "id": "log-monitor-run",
+      "name": "Log Monitor Run",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1100, 0],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "no-sources",
+      "name": "No Sources to Check",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [660, 200]
+    }
+  ],
+  "connections": {
+    "Every 6 Hours": {
+      "main": [
+        [
+          {
+            "node": "Get Sources to Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Sources to Check": {
+      "main": [
+        [
+          {
+            "node": "Has Sources?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Sources?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Sync Jobs",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get System Stats",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Sources to Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Sync Jobs": {
+      "main": [
+        [
+          {
+            "node": "Enqueue Sync Job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get System Stats": {
+      "main": [
+        [
+          {
+            "node": "Cleanup Old Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cleanup Old Data": {
+      "main": [
+        [
+          {
+            "node": "Log Monitor Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "ComfyUI-KB"
+    }
+  ]
+}

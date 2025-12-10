@@ -1,0 +1,455 @@
+{
+  "name": "ComfyUI KB - Query API",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "comfyui-kb/search",
+        "options": {}
+      },
+      "id": "webhook-search",
+      "name": "Webhook - Search",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "comfyui-kb-search"
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "comfyui-kb/videos",
+        "options": {}
+      },
+      "id": "webhook-videos",
+      "name": "Webhook - List Videos",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 200],
+      "webhookId": "comfyui-kb-videos"
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "comfyui-kb/creators",
+        "options": {}
+      },
+      "id": "webhook-creators",
+      "name": "Webhook - List Creators",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 400],
+      "webhookId": "comfyui-kb-creators"
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "comfyui-kb/stats",
+        "options": {}
+      },
+      "id": "webhook-stats",
+      "name": "Webhook - Stats",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 600],
+      "webhookId": "comfyui-kb-stats"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Busca por texto em vídeos e análises\nSELECT \n  v.id,\n  v.title,\n  v.url,\n  v.thumbnail_url,\n  v.published_at,\n  va.summary_pt,\n  va.difficulty_level,\n  va.techniques_shown,\n  va.custom_nodes_mentioned,\n  c.name as creator_name,\n  c.handle as creator_handle,\n  ts_rank(to_tsvector('portuguese', COALESCE(v.title, '') || ' ' || COALESCE(va.summary_pt, '') || ' ' || COALESCE(va.summary, '')), plainto_tsquery('portuguese', '{{ $json.query.q || '' }}')) as rank\nFROM videos v\nLEFT JOIN video_analysis va ON v.id = va.video_id\nLEFT JOIN sources s ON v.source_id = s.id\nLEFT JOIN creators c ON s.creator_id = c.id\nWHERE \n  v.analysis_status = 'completed'\n  AND (\n    '{{ $json.query.q || '' }}' = ''\n    OR to_tsvector('portuguese', COALESCE(v.title, '') || ' ' || COALESCE(va.summary_pt, '') || ' ' || COALESCE(va.summary, '')) @@ plainto_tsquery('portuguese', '{{ $json.query.q }}')\n    OR '{{ $json.query.q }}' = ANY(va.techniques_shown)\n    OR '{{ $json.query.q }}' = ANY(va.custom_nodes_mentioned)\n    OR '{{ $json.query.q }}' = ANY(va.models_mentioned)\n  )\n  {{ $json.query.difficulty ? `AND va.difficulty_level = '${$json.query.difficulty}'` : '' }}\n  {{ $json.query.technique ? `AND '${$json.query.technique}' = ANY(va.techniques_shown)` : '' }}\n  {{ $json.query.creator ? `AND c.handle = '${$json.query.creator}'` : '' }}\nORDER BY \n  {{ $json.query.sort === 'date' ? 'v.published_at DESC' : 'rank DESC' }}\nLIMIT {{ $json.query.limit || 20 }}\nOFFSET {{ $json.query.offset || 0 }};",
+        "options": {}
+      },
+      "id": "search-videos",
+      "name": "Search Videos",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [220, 0],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"query\": \"{{ $('Webhook - Search').first().json.query.q || '' }}\",\n  \"count\": {{ $json.length || 0 }},\n  \"results\": {{ JSON.stringify($input.all().map(i => i.json)) }}\n}",
+        "options": {}
+      },
+      "id": "respond-search",
+      "name": "Respond Search",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Listar vídeos com filtros\nSELECT \n  v.id,\n  v.external_id,\n  v.title,\n  v.url,\n  v.thumbnail_url,\n  v.duration_seconds,\n  v.published_at,\n  v.view_count,\n  v.analysis_status,\n  va.summary_pt,\n  va.difficulty_level,\n  va.techniques_shown,\n  c.name as creator_name,\n  c.handle as creator_handle\nFROM videos v\nLEFT JOIN video_analysis va ON v.id = va.video_id\nLEFT JOIN sources s ON v.source_id = s.id\nLEFT JOIN creators c ON s.creator_id = c.id\nWHERE 1=1\n  {{ $json.query.status ? `AND v.analysis_status = '${$json.query.status}'` : '' }}\n  {{ $json.query.creator ? `AND c.handle = '${$json.query.creator}'` : '' }}\nORDER BY v.published_at DESC\nLIMIT {{ $json.query.limit || 50 }}\nOFFSET {{ $json.query.offset || 0 }};",
+        "options": {}
+      },
+      "id": "list-videos",
+      "name": "List Videos",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [220, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"count\": {{ $json.length || 0 }},\n  \"videos\": {{ JSON.stringify($input.all().map(i => i.json)) }}\n}",
+        "options": {}
+      },
+      "id": "respond-videos",
+      "name": "Respond Videos",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [440, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Listar criadores com estatísticas\nSELECT \n  c.id,\n  c.name,\n  c.handle,\n  c.bio,\n  c.specialties,\n  c.quality_score,\n  c.website_url,\n  COUNT(DISTINCT s.id) as source_count,\n  COUNT(DISTINCT v.id) as video_count,\n  COUNT(DISTINCT CASE WHEN v.analysis_status = 'completed' THEN v.id END) as analyzed_count,\n  MAX(v.published_at) as latest_video_at\nFROM creators c\nLEFT JOIN sources s ON c.id = s.creator_id\nLEFT JOIN videos v ON s.id = v.source_id\nGROUP BY c.id\nORDER BY video_count DESC\nLIMIT {{ $json.query.limit || 50 }};",
+        "options": {}
+      },
+      "id": "list-creators",
+      "name": "List Creators",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [220, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"count\": {{ $json.length || 0 }},\n  \"creators\": {{ JSON.stringify($input.all().map(i => i.json)) }}\n}",
+        "options": {}
+      },
+      "id": "respond-creators",
+      "name": "Respond Creators",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [440, 400]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Estatísticas do sistema\nSELECT \n  (SELECT COUNT(*) FROM creators) as total_creators,\n  (SELECT COUNT(*) FROM sources WHERE monitoring_status = 'active') as active_sources,\n  (SELECT COUNT(*) FROM videos) as total_videos,\n  (SELECT COUNT(*) FROM videos WHERE analysis_status = 'completed') as analyzed_videos,\n  (SELECT COUNT(*) FROM videos WHERE analysis_status = 'pending') as pending_videos,\n  (SELECT COUNT(*) FROM workflows) as total_workflows,\n  (SELECT COUNT(*) FROM nodes_catalog) as unique_nodes,\n  (SELECT COUNT(*) FROM video_moments) as total_moments,\n  (SELECT COUNT(*) FROM video_moments WHERE frame_path IS NOT NULL) as frames_extracted,\n  (SELECT COUNT(*) FROM job_queue WHERE status = 'pending') as pending_jobs,\n  (SELECT COUNT(*) FROM job_queue WHERE status = 'processing') as processing_jobs,\n  (SELECT SUM(tokens_used) FROM video_analysis) as total_tokens_used,\n  (SELECT array_agg(DISTINCT unnest) FROM (SELECT unnest(techniques_shown) FROM video_analysis) t LIMIT 20) as top_techniques,\n  (SELECT array_agg(DISTINCT unnest) FROM (SELECT unnest(custom_nodes_mentioned) FROM video_analysis) n LIMIT 20) as top_nodes;",
+        "options": {}
+      },
+      "id": "get-full-stats",
+      "name": "Get Full Stats",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [220, 600],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"stats\": {{ JSON.stringify($input.first().json) }},\n  \"generated_at\": \"{{ new Date().toISOString() }}\"\n}",
+        "options": {}
+      },
+      "id": "respond-stats",
+      "name": "Respond Stats",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [440, 600]
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "comfyui-kb/video/:id",
+        "options": {}
+      },
+      "id": "webhook-video-detail",
+      "name": "Webhook - Video Detail",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 800],
+      "webhookId": "comfyui-kb-video-detail"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Detalhes completos de um vídeo\nSELECT \n  v.*,\n  va.summary,\n  va.summary_pt,\n  va.difficulty_level,\n  va.key_topics,\n  va.techniques_shown,\n  va.models_mentioned,\n  va.custom_nodes_mentioned,\n  va.prerequisites,\n  va.raw_response,\n  c.name as creator_name,\n  c.handle as creator_handle,\n  c.website_url as creator_website\nFROM videos v\nLEFT JOIN video_analysis va ON v.id = va.video_id\nLEFT JOIN sources s ON v.source_id = s.id\nLEFT JOIN creators c ON s.creator_id = c.id\nWHERE v.id = {{ $json.params.id }};",
+        "options": {}
+      },
+      "id": "get-video-detail",
+      "name": "Get Video Detail",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [220, 800],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Momentos do vídeo\nSELECT *\nFROM video_moments\nWHERE video_id = {{ $('Webhook - Video Detail').first().json.params.id }}\nORDER BY timestamp_seconds;",
+        "options": {}
+      },
+      "id": "get-video-moments",
+      "name": "Get Video Moments",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [440, 800],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Combinar vídeo e momentos\nconst video = $('Get Video Detail').first().json;\nconst moments = $('Get Video Moments').all().map(i => i.json);\n\nreturn {\n  video,\n  moments,\n  moments_count: moments.length\n};"
+      },
+      "id": "combine-video-data",
+      "name": "Combine Video Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 800]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"video\": {{ JSON.stringify($json.video) }},\n  \"moments\": {{ JSON.stringify($json.moments) }},\n  \"moments_count\": {{ $json.moments_count }}\n}",
+        "options": {}
+      },
+      "id": "respond-video-detail",
+      "name": "Respond Video Detail",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [880, 800]
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "comfyui-kb/techniques",
+        "options": {}
+      },
+      "id": "webhook-techniques",
+      "name": "Webhook - Techniques",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 1000],
+      "webhookId": "comfyui-kb-techniques"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Listar todas as técnicas encontradas com contagem\nSELECT \n  technique,\n  COUNT(*) as video_count\nFROM (\n  SELECT unnest(techniques_shown) as technique\n  FROM video_analysis\n) t\nGROUP BY technique\nORDER BY video_count DESC;",
+        "options": {}
+      },
+      "id": "list-techniques",
+      "name": "List Techniques",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [220, 1000],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"techniques\": {{ JSON.stringify($input.all().map(i => i.json)) }}\n}",
+        "options": {}
+      },
+      "id": "respond-techniques",
+      "name": "Respond Techniques",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [440, 1000]
+    }
+  ],
+  "connections": {
+    "Webhook - Search": {
+      "main": [
+        [
+          {
+            "node": "Search Videos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Videos": {
+      "main": [
+        [
+          {
+            "node": "Respond Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook - List Videos": {
+      "main": [
+        [
+          {
+            "node": "List Videos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Videos": {
+      "main": [
+        [
+          {
+            "node": "Respond Videos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook - List Creators": {
+      "main": [
+        [
+          {
+            "node": "List Creators",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Creators": {
+      "main": [
+        [
+          {
+            "node": "Respond Creators",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook - Stats": {
+      "main": [
+        [
+          {
+            "node": "Get Full Stats",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Full Stats": {
+      "main": [
+        [
+          {
+            "node": "Respond Stats",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook - Video Detail": {
+      "main": [
+        [
+          {
+            "node": "Get Video Detail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Video Detail": {
+      "main": [
+        [
+          {
+            "node": "Get Video Moments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Video Moments": {
+      "main": [
+        [
+          {
+            "node": "Combine Video Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combine Video Data": {
+      "main": [
+        [
+          {
+            "node": "Respond Video Detail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook - Techniques": {
+      "main": [
+        [
+          {
+            "node": "List Techniques",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Techniques": {
+      "main": [
+        [
+          {
+            "node": "Respond Techniques",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "ComfyUI-KB"
+    }
+  ]
+}

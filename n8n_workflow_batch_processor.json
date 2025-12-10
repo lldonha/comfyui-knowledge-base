@@ -1,0 +1,705 @@
+{
+  "name": "ComfyUI KB - Batch Processor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "seconds",
+              "secondsInterval": 10
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Every 10 Seconds",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Buscar próximo job disponível respeitando rate limits\nWITH available_job AS (\n  SELECT \n    jq.id,\n    jq.job_type,\n    jq.source_id,\n    jq.video_id,\n    jq.workflow_id,\n    jq.input_data,\n    jq.api_used,\n    jq.attempts\n  FROM job_queue jq\n  LEFT JOIN api_configs ac ON jq.api_used = ac.api_name\n  WHERE jq.status = 'pending'\n    AND jq.scheduled_for <= NOW()\n    AND jq.attempts < jq.max_attempts\n    AND (\n      jq.api_used IS NULL \n      OR (\n        ac.is_enabled = true\n        AND ac.current_minute_count < ac.requests_per_minute\n        AND ac.current_day_count < ac.requests_per_day\n      )\n    )\n  ORDER BY jq.priority DESC, jq.created_at ASC\n  LIMIT 1\n  FOR UPDATE SKIP LOCKED\n)\nUPDATE job_queue\nSET \n  status = 'processing',\n  started_at = NOW(),\n  attempts = attempts + 1\nFROM available_job\nWHERE job_queue.id = available_job.id\nRETURNING \n  job_queue.id,\n  job_queue.job_type,\n  job_queue.source_id,\n  job_queue.video_id,\n  job_queue.workflow_id,\n  job_queue.input_data,\n  job_queue.api_used,\n  job_queue.attempts;",
+        "options": {}
+      },
+      "id": "get-next-job",
+      "name": "Get Next Job",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [220, 0],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-job",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "number",
+                "operation": "exists"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "has-job",
+      "name": "Has Job?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "sync-source",
+              "leftValue": "={{ $json.job_type }}",
+              "rightValue": "sync_source",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "route-job-type",
+      "name": "Job Type Router",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [660, 0],
+      "parameters2": {
+        "rules": {
+          "values": [
+            {
+              "outputKey": "sync_source",
+              "conditions": {
+                "options": {
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.job_type }}",
+                    "rightValue": "sync_source",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "outputKey": "analyze_video",
+              "conditions": {
+                "options": {
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.job_type }}",
+                    "rightValue": "analyze_video",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "outputKey": "extract_frames",
+              "conditions": {
+                "options": {
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.job_type }}",
+                    "rightValue": "extract_frames",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "outputKey": "download_workflow",
+              "conditions": {
+                "options": {
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.job_type }}",
+                    "rightValue": "download_workflow",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Buscar dados da source para sincronização\nSELECT \n  s.*,\n  c.name as creator_name,\n  c.handle as creator_handle\nFROM sources s\nJOIN creators c ON s.creator_id = c.id\nWHERE s.id = {{ $('Get Next Job').first().json.source_id }};",
+        "options": {}
+      },
+      "id": "get-source-data",
+      "name": "Get Source Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [880, -200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://www.googleapis.com/youtube/v3/playlistItems",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "part",
+              "value": "snippet,contentDetails"
+            },
+            {
+              "name": "playlistId",
+              "value": "={{ $json.platform_metadata?.uploadsPlaylistId || 'UU' + $json.platform_id?.substring(2) }}"
+            },
+            {
+              "name": "maxResults",
+              "value": "={{ $('Get Next Job').first().json.input_data?.max_videos || 20 }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "youtube-list-videos",
+      "name": "YouTube - List Videos",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, -200],
+      "credentials": {
+        "googleApi": {
+          "id": "google-api",
+          "name": "Google API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Processar lista de vídeos e preparar para inserção\nconst ytResponse = $input.first().json;\nconst sourceData = $('Get Source Data').first().json;\nconst jobData = $('Get Next Job').first().json;\n\nif (!ytResponse.items || ytResponse.items.length === 0) {\n  return {\n    sourceId: sourceData.id,\n    jobId: jobData.id,\n    videosFound: 0,\n    videos: []\n  };\n}\n\nconst videos = ytResponse.items.map(item => ({\n  sourceId: sourceData.id,\n  externalId: item.contentDetails.videoId,\n  title: item.snippet.title,\n  description: item.snippet.description?.substring(0, 5000) || '',\n  thumbnailUrl: item.snippet.thumbnails?.high?.url || item.snippet.thumbnails?.default?.url,\n  publishedAt: item.snippet.publishedAt,\n  url: `https://www.youtube.com/watch?v=${item.contentDetails.videoId}`\n}));\n\nreturn {\n  sourceId: sourceData.id,\n  jobId: jobData.id,\n  videosFound: videos.length,\n  videos,\n  nextPageToken: ytResponse.nextPageToken\n};"
+      },
+      "id": "process-video-list",
+      "name": "Process Video List",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, -200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Inserir vídeos encontrados (ignorar duplicatas)\n{{ $json.videos.map(v => `\nINSERT INTO videos (source_id, external_id, url, title, description, thumbnail_url, published_at)\nVALUES (\n  ${v.sourceId},\n  '${v.externalId}',\n  '${v.url}',\n  '${v.title.replace(/'/g, \"''\")}',\n  '${v.description.replace(/'/g, \"''\")}',\n  '${v.thumbnailUrl || ''}',\n  '${v.publishedAt}'\n)\nON CONFLICT (source_id, external_id) DO NOTHING;`).join('\\n') }}\n\n-- Retornar IDs dos vídeos que precisam de análise\nSELECT v.id, v.external_id, v.title\nFROM videos v\nWHERE v.source_id = {{ $json.sourceId }}\n  AND v.analysis_status = 'pending'\nORDER BY v.published_at DESC\nLIMIT 20;",
+        "options": {}
+      },
+      "id": "insert-videos",
+      "name": "Insert Videos",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1540, -200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Enfileirar análise para cada vídeo pendente\nconst videos = $input.all().map(i => i.json);\nconst jobData = $('Get Next Job').first().json;\n\nconst jobsToCreate = videos\n  .filter(v => v.id)  // Apenas vídeos com ID\n  .map(v => ({\n    videoId: v.id,\n    title: v.title\n  }));\n\nreturn {\n  sourceJobId: jobData.id,\n  videosToAnalyze: jobsToCreate.length,\n  videos: jobsToCreate\n};"
+      },
+      "id": "prepare-analysis-jobs",
+      "name": "Prepare Analysis Jobs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1760, -200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Enfileirar jobs de análise para os vídeos\n{{ $json.videos.slice(0, 10).map(v => `\nSELECT enqueue_job(\n  'analyze_video'::job_type,\n  5,\n  NULL,\n  ${v.videoId},\n  NULL,\n  '{}'::jsonb,\n  'gemini_flash'\n);`).join('\\n') }}\n\n-- Marcar job de sync como completo\nUPDATE job_queue\nSET \n  status = 'completed',\n  completed_at = NOW(),\n  output_data = '{{ JSON.stringify({ videos_found: $json.videosToAnalyze }) }}'::jsonb\nWHERE id = {{ $json.sourceJobId }};",
+        "options": {}
+      },
+      "id": "enqueue-analysis-jobs",
+      "name": "Enqueue Analysis Jobs",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1980, -200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Atualizar source com última verificação\nUPDATE sources\nSET \n  last_checked_at = NOW(),\n  next_check_at = NOW() + (check_frequency_hours || ' hours')::interval,\n  total_items_found = total_items_found + {{ $('Process Video List').first().json.videosFound }},\n  error_count = 0,\n  updated_at = NOW()\nWHERE id = {{ $('Get Source Data').first().json.id }};",
+        "options": {}
+      },
+      "id": "update-source-status",
+      "name": "Update Source Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2200, -200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Buscar dados do vídeo para análise\nSELECT \n  v.*,\n  s.platform,\n  c.name as creator_name\nFROM videos v\nJOIN sources s ON v.source_id = s.id\nJOIN creators c ON s.creator_id = c.id\nWHERE v.id = {{ $('Get Next Job').first().json.video_id }};",
+        "options": {}
+      },
+      "id": "get-video-for-analysis",
+      "name": "Get Video for Analysis",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [880, 0],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Incrementar rate limit do Gemini\nSELECT check_and_increment_rate_limit('gemini_flash') as can_proceed;",
+        "options": {}
+      },
+      "id": "increment-rate-limit",
+      "name": "Increment Rate Limit",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1100, 0],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googlePalmApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [\n    {\n      \"parts\": [\n        {\n          \"text\": \"Analise este tutorial de ComfyUI.\\n\\nTítulo: {{ $('Get Video for Analysis').first().json.title }}\\nCriador: {{ $('Get Video for Analysis').first().json.creator_name }}\\nDescrição:\\n{{ $('Get Video for Analysis').first().json.description?.substring(0, 4000) || '' }}\\n\\nRetorne APENAS JSON:\\n{\\n  \\\"summary\\\": \\\"Resumo em 2-3 parágrafos\\\",\\n  \\\"summary_pt\\\": \\\"Resumo em português\\\",\\n  \\\"key_topics\\\": [],\\n  \\\"techniques\\\": [],\\n  \\\"models_mentioned\\\": [],\\n  \\\"custom_nodes_mentioned\\\": [],\\n  \\\"difficulty\\\": \\\"beginner|intermediate|advanced\\\",\\n  \\\"prerequisites\\\": [],\\n  \\\"key_timestamps\\\": [{\\\"time\\\": \\\"MM:SS\\\", \\\"type\\\": \\\"workflow_shown|tip|result\\\", \\\"description\\\": \\\"\\\", \\\"importance\\\": 1-10}]\\n}\"\n        }\n      ]\n    }\n  ],\n  \"generationConfig\": {\n    \"temperature\": 0.2,\n    \"maxOutputTokens\": 3000\n  }\n}",
+        "options": {}
+      },
+      "id": "gemini-analyze-batch",
+      "name": "Gemini - Analyze (Batch)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1320, 0],
+      "credentials": {
+        "googlePalmApi": {
+          "id": "gemini-api",
+          "name": "Gemini API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Processar resposta do Gemini e salvar análise\nconst geminiResponse = $input.first().json;\nconst videoData = $('Get Video for Analysis').first().json;\nconst jobData = $('Get Next Job').first().json;\n\nlet analysis;\ntry {\n  const text = geminiResponse.candidates[0].content.parts[0].text;\n  const cleanText = text.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\n  analysis = JSON.parse(cleanText);\n} catch (e) {\n  analysis = {\n    summary: 'Erro ao processar análise: ' + e.message,\n    error: true\n  };\n}\n\nreturn {\n  jobId: jobData.id,\n  videoId: videoData.id,\n  analysis,\n  tokensUsed: geminiResponse.usageMetadata?.totalTokenCount || 0,\n  success: !analysis.error\n};"
+      },
+      "id": "process-batch-analysis",
+      "name": "Process Batch Analysis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Inserir análise\nINSERT INTO video_analysis (\n  video_id,\n  summary,\n  summary_pt,\n  difficulty_level,\n  key_topics,\n  techniques_shown,\n  models_mentioned,\n  custom_nodes_mentioned,\n  prerequisites,\n  raw_response,\n  model_used,\n  tokens_used\n)\nVALUES (\n  {{ $json.videoId }},\n  '{{ $json.analysis.summary?.replace(/'/g, \"''\") || '' }}',\n  '{{ $json.analysis.summary_pt?.replace(/'/g, \"''\") || '' }}',\n  '{{ $json.analysis.difficulty || 'intermediate' }}',\n  ARRAY[{{ $json.analysis.key_topics?.map(t => `'${t}'`).join(',') || '' }}],\n  ARRAY[{{ $json.analysis.techniques?.map(t => `'${t}'`).join(',') || '' }}],\n  ARRAY[{{ $json.analysis.models_mentioned?.map(t => `'${t}'`).join(',') || '' }}],\n  ARRAY[{{ $json.analysis.custom_nodes_mentioned?.map(t => `'${t}'`).join(',') || '' }}],\n  ARRAY[{{ $json.analysis.prerequisites?.map(t => `'${t.replace(/'/g, \"''\")}'`).join(',') || '' }}],\n  '{{ JSON.stringify($json.analysis).replace(/'/g, \"''\") }}'::jsonb,\n  'gemini-1.5-flash',\n  {{ $json.tokensUsed }}\n)\nON CONFLICT (video_id) DO UPDATE SET\n  summary = EXCLUDED.summary,\n  updated_at = NOW();\n\n-- Atualizar status do vídeo\nUPDATE videos SET analysis_status = 'completed' WHERE id = {{ $json.videoId }};\n\n-- Marcar job como completo\nUPDATE job_queue\nSET \n  status = '{{ $json.success ? 'completed' : 'failed' }}',\n  completed_at = NOW(),\n  output_data = '{{ JSON.stringify({ tokens: $json.tokensUsed }) }}'::jsonb\nWHERE id = {{ $json.jobId }};",
+        "options": {}
+      },
+      "id": "save-batch-analysis",
+      "name": "Save Batch Analysis",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1760, 0],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Buscar dados do vídeo para extração de frames\nSELECT \n  v.*,\n  jq.input_data\nFROM videos v\nJOIN job_queue jq ON jq.video_id = v.id\nWHERE jq.id = {{ $('Get Next Job').first().json.id }};",
+        "options": {}
+      },
+      "id": "get-video-for-frames",
+      "name": "Get Video for Frames",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [880, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Preparar comando yt-dlp e FFmpeg para extração de frames\nconst videoData = $input.first().json;\nconst jobData = $('Get Next Job').first().json;\n\nconst timestamps = jobData.input_data?.timestamps || [];\nconst videoId = videoData.external_id;\nconst outputDir = `/data/comfyui_kb/frames/${videoData.id}`;\n\n// Comandos a executar\nconst commands = [\n  // Criar diretório\n  `mkdir -p ${outputDir}`,\n  \n  // Baixar vídeo em baixa resolução (só para frames)\n  `yt-dlp -f 'best[height<=720]' -o '${outputDir}/video.mp4' 'https://www.youtube.com/watch?v=${videoId}' --no-playlist`,\n  \n  // Extrair frames nos timestamps específicos\n  ...timestamps.map((ts, i) => \n    `ffmpeg -ss ${ts} -i '${outputDir}/video.mp4' -vframes 1 -q:v 2 '${outputDir}/frame_${String(i).padStart(3, '0')}_${ts}s.jpg' -y`\n  ),\n  \n  // Remover vídeo após extração (economizar espaço)\n  `rm -f '${outputDir}/video.mp4'`\n];\n\nreturn {\n  jobId: jobData.id,\n  videoId: videoData.id,\n  outputDir,\n  timestamps,\n  commands,\n  commandString: commands.join(' && ')\n};"
+      },
+      "id": "prepare-frame-extraction",
+      "name": "Prepare Frame Extraction",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 200]
+    },
+    {
+      "parameters": {
+        "command": "={{ $json.commandString }}"
+      },
+      "id": "execute-frame-extraction",
+      "name": "Execute Frame Extraction",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1320, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Atualizar momentos com paths dos frames\n{{ $('Prepare Frame Extraction').first().json.timestamps.map((ts, i) => `\nUPDATE video_moments\nSET frame_path = '${$('Prepare Frame Extraction').first().json.outputDir}/frame_${String(i).padStart(3, '0')}_${ts}s.jpg'\nWHERE video_id = ${$('Prepare Frame Extraction').first().json.videoId}\n  AND timestamp_seconds = ${ts};`).join('\\n') }}\n\n-- Atualizar status do vídeo\nUPDATE videos SET frames_status = 'completed' WHERE id = {{ $('Prepare Frame Extraction').first().json.videoId }};\n\n-- Marcar job como completo\nUPDATE job_queue\nSET \n  status = 'completed',\n  completed_at = NOW(),\n  output_data = '{{ JSON.stringify({ frames_extracted: $('Prepare Frame Extraction').first().json.timestamps.length }) }}'::jsonb\nWHERE id = {{ $('Prepare Frame Extraction').first().json.jobId }};",
+        "options": {}
+      },
+      "id": "update-frames-status",
+      "name": "Update Frames Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1540, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Marcar job como falho\nUPDATE job_queue\nSET \n  status = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'pending' END,\n  scheduled_for = CASE WHEN attempts < max_attempts THEN NOW() + INTERVAL '5 minutes' ELSE scheduled_for END,\n  error_message = '{{ $json.error?.message || 'Unknown error' }}',\n  error_details = '{{ JSON.stringify($json.error || {}) }}'::jsonb\nWHERE id = {{ $('Get Next Job').first().json.id }};",
+        "options": {}
+      },
+      "id": "handle-job-error",
+      "name": "Handle Job Error",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1540, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cosmic",
+          "name": "PostgreSQL Cosmic"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "no-op",
+      "name": "No Job Available",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [660, 200]
+    }
+  ],
+  "connections": {
+    "Every 10 Seconds": {
+      "main": [
+        [
+          {
+            "node": "Get Next Job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Next Job": {
+      "main": [
+        [
+          {
+            "node": "Has Job?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Job?": {
+      "main": [
+        [
+          {
+            "node": "Job Type Router",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Job Available",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Job Type Router": {
+      "main": [
+        [
+          {
+            "node": "Get Source Data",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get Video for Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get Video for Frames",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Source Data": {
+      "main": [
+        [
+          {
+            "node": "YouTube - List Videos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "YouTube - List Videos": {
+      "main": [
+        [
+          {
+            "node": "Process Video List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Video List": {
+      "main": [
+        [
+          {
+            "node": "Insert Videos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert Videos": {
+      "main": [
+        [
+          {
+            "node": "Prepare Analysis Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Analysis Jobs": {
+      "main": [
+        [
+          {
+            "node": "Enqueue Analysis Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enqueue Analysis Jobs": {
+      "main": [
+        [
+          {
+            "node": "Update Source Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Video for Analysis": {
+      "main": [
+        [
+          {
+            "node": "Increment Rate Limit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Increment Rate Limit": {
+      "main": [
+        [
+          {
+            "node": "Gemini - Analyze (Batch)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini - Analyze (Batch)": {
+      "main": [
+        [
+          {
+            "node": "Process Batch Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Batch Analysis": {
+      "main": [
+        [
+          {
+            "node": "Save Batch Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Video for Frames": {
+      "main": [
+        [
+          {
+            "node": "Prepare Frame Extraction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Frame Extraction": {
+      "main": [
+        [
+          {
+            "node": "Execute Frame Extraction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Frame Extraction": {
+      "main": [
+        [
+          {
+            "node": "Update Frames Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "ComfyUI-KB"
+    }
+  ]
+}
